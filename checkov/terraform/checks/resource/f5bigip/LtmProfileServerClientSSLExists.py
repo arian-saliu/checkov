@@ -4,7 +4,7 @@ from checkov.terraform.checks.resource.base_resource_value_check import BaseReso
 
 class LtmProfileServerClientSSLExists(BaseResourceCheck):
     def __init__(self):
-        name = "Make sure hot adding cpu is enabled."
+        name = "Make sure hot adding cpu is enabled"
         id = "CKV_BIP_2"
         supported_resources = ['bigip_ltm_profile_server_ssl', 'bigip_ltm_profile_client_ssl']
         categories = [CheckCategories.GENERAL_SECURITY]
