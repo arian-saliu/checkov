@@ -1,9 +1,10 @@
 import itertools
+import logging
 import re
 from functools import reduce
 from math import ceil, floor, log
 
-from checkov.terraform.parser_functions import tonumber, FUNCTION_FAILED, create_map, tobool, tolist, tomap, tostring
+from checkov.terraform.parser_functions import tonumber, FUNCTION_FAILED, create_map, tobool, tomap, tostring
 
 """
 This file contains a custom implementation of the builtin `eval` function.
@@ -179,3 +180,11 @@ SAFE_EVAL_DICT['tostring'] = lambda arg: arg if isinstance(arg, str) else wrap_f
 
 # encoding
 SAFE_EVAL_DICT['jsonencode'] = lambda arg: arg
+
+
+def evaluate(input_str):
+    if "__" in input_str:
+        logging.warning(f"got a substring with double underscore, which is not allowed. origin string: {input_str}")
+        return input_str
+    return eval(input_str, {"__builtins__": None}, SAFE_EVAL_DICT)  # nosec
+
