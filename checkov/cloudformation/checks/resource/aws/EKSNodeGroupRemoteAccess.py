@@ -1,9 +1,11 @@
+from typing import List
+
 from checkov.common.models.enums import CheckResult, CheckCategories
 from checkov.cloudformation.checks.resource.base_resource_check import BaseResourceCheck
 
 class EKSNodeGroupRemoteAccess(BaseResourceCheck):
     def __init__(self):
-        name = "Ensure Amazon EKS Node group has implict SSH access from 0.0.0.0/0"
+        name = "Ensure Amazon EKS Node group has implicit SSH access from 0.0.0.0/0"
         id = "CKV_AWS_100"
         supported_resources = ['AWS::EKS::Nodegroup']
         categories = [CheckCategories.KUBERNETES]
@@ -18,6 +20,9 @@ class EKSNodeGroupRemoteAccess(BaseResourceCheck):
                     else:
                         return CheckResult.FAILED
         return CheckResult.PASSED
+
+    def get_evaluated_keys(self) -> List[str]:
+        return ["Properties/RemoteAccess/Ec2SshKey", "Properties/RemoteAccess/SourceSecurityGroups"]
 
 
 check = EKSNodeGroupRemoteAccess()

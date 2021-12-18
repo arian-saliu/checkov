@@ -1,10 +1,13 @@
 import os
 import re
+from pathlib import Path
+from typing import Union
 
 from colorama import init, Fore, Style
 from termcolor import colored
 
 from checkov.common.models.enums import CheckResult
+from checkov.common.util.file_utils import convert_to_unix_path
 
 init(autoreset=True)
 
@@ -26,7 +29,7 @@ class Record:
 
     def __init__(self, check_id, check_name, check_result, code_block, file_path, file_line_range, resource,
                  evaluations, check_class, file_abs_path, entity_tags=None,
-                 caller_file_path=None, caller_file_line_range=None):
+                 caller_file_path=None, caller_file_line_range=None, bc_check_id=None, resource_address=None):
         """
         :param evaluations: A dict with the key being the variable name, value being a dict containing:
                              - 'var_file'
@@ -34,12 +37,13 @@ class Record:
                              - 'definitions', a list of dicts which contain 'definition_expression'
         """
         self.check_id = check_id
+        self.bc_check_id = bc_check_id
         self.check_name = check_name
         self.check_result = check_result
         self.code_block = code_block
         self.file_path = file_path
         self.file_abs_path = file_abs_path
-        self.repo_file_path = f'/{os.path.relpath(file_abs_path)}' # matches file paths given in the BC platform.
+        self.repo_file_path = self._determine_repo_file_path(file_abs_path)
         self.file_line_range = file_line_range
         self.resource = resource
         self.evaluations = evaluations
@@ -48,6 +52,16 @@ class Record:
         self.entity_tags = entity_tags
         self.caller_file_path = caller_file_path
         self.caller_file_line_range = caller_file_line_range
+        self.resource_address = resource_address
+
+    @staticmethod
+    def _determine_repo_file_path(file_path: Union[str, "os.PathLike[str]"]) -> str:
+        # matches file paths given in the BC platform and should always be a unix path
+        repo_file_path = Path(file_path)
+        if Path.cwd().drive == repo_file_path.drive:
+            return convert_to_unix_path(f"/{os.path.relpath(repo_file_path)}").replace("/..", "")
+
+        return f"/{'/'.join(repo_file_path.parts[1:])}"
 
     def set_guideline(self, guideline):
         self.guideline = guideline
@@ -58,7 +72,7 @@ class Record:
 
     def _is_expression_in_code_lines(self, expression):
         stripped_expression = self._trim_special_chars(expression)
-        return any([stripped_expression in self._trim_special_chars(line) for (_, line) in self.code_block])
+        return any(stripped_expression in self._trim_special_chars(line) for (_, line) in self.code_block)
 
     @staticmethod
     def _code_line_string(code_block):
@@ -73,9 +87,9 @@ class Record:
                 string_block += "\t\t" + Fore.WHITE + str(line_num) + spaces + ' | ' + Fore.YELLOW + line
         return string_block
 
-    def to_string(self, compact=False):
+    def to_string(self, compact=False, use_bc_ids=False):
         status = ''
-        evaluation_message = f''
+        evaluation_message = ''
         status_color = "white"
         if self.check_result['result'] == CheckResult.PASSED:
             status = CheckResult.PASSED.name
@@ -88,7 +102,7 @@ class Record:
             status_color = 'blue'
             suppress_comment = "\tSuppress comment: {}\n".format(self.check_result['suppress_comment'])
 
-        check_message = colored("Check: {}: \"{}\"\n".format(self.check_id, self.check_name), "white")
+        check_message = colored("Check: {}: \"{}\"\n".format(self.get_output_id(use_bc_ids), self.check_name), "white")
         guideline_message = ''
         if self.guideline:
             guideline_message = "\tGuide: " + Style.BRIGHT + colored(f"{self.guideline}\n", 'blue', attrs=['underline']) + Style.RESET_ALL
@@ -127,3 +141,9 @@ class Record:
 
     def __str__(self):
         return self.to_string()
+
+    def get_output_id(self, use_bc_ids: bool) -> str:
+        return self.bc_check_id if self.bc_check_id and use_bc_ids else self.check_id
+
+    def get_unique_string(self):
+        return f"{self.check_id}.{self.check_result}.{self.file_abs_path}.{self.file_line_range}.{self.resource}"

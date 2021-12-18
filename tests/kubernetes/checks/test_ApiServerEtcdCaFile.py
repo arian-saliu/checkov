@@ -2,7 +2,7 @@
 import os
 import unittest
 
-from checkov.kubernetes.checks.ApiServerEtcdCaFile import check
+from checkov.kubernetes.checks.resource.k8s.ApiServerEtcdCaFile import check
 from checkov.kubernetes.runner import Runner
 from checkov.runner_filter import RunnerFilter
 
@@ -24,12 +24,12 @@ class TestApiServerEtcdCaFile(unittest.TestCase):
         
         
         for record in report.failed_checks:
-            self.assertTrue("FAILED" in record.file_path)
-            self.assertTrue(record.check_id in [check.id])
+            self.assertIn("FAILED", record.file_path)
+            self.assertIn(record.check_id, [check.id])
             
         for record in report.passed_checks:
-            self.assertTrue("PASSED" in record.file_path)
-            self.assertTrue(record.check_id in [check.id])              
+            self.assertIn("PASSED", record.file_path)
+            self.assertIn(record.check_id, [check.id])
 
 
 if __name__ == '__main__':

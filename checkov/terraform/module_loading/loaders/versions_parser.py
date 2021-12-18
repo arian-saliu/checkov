@@ -1,6 +1,8 @@
 import re
+from typing import List
+
 from packaging import version
-VERSION_REGEX = re.compile(r'^(?P<operator>=|!=|>=|>|<=|<|~>)*(?P<version>.+)$')
+VERSION_REGEX = re.compile(r"^(?P<operator>=|!=|>=|>|<=|<|~>)?\s*(?P<version>[\d.]+-?\w*)$")
 
 
 class VersionConstraint:
@@ -32,8 +34,11 @@ class VersionConstraint:
         }[self.operator](other_version)
         return res
 
+    def __str__(self):
+        return f"{self.operator}{self.version}"
 
-def get_version_constraints(raw_version):
+
+def get_version_constraints(raw_version: str) -> List[VersionConstraint]:
     """
     :param raw_version: A string representation of a version, e.g: "~> v1.2.3"
     :return: VersionConstraint instance
@@ -42,12 +47,14 @@ def get_version_constraints(raw_version):
     raw_version_constraints = raw_version.split(',')
     version_constraints = []
     for constraint in raw_version_constraints:
-        constraint_parts = re.search(VERSION_REGEX, constraint).groupdict()
-        version_constraints.append(VersionConstraint(constraint_parts))
+        match = re.search(VERSION_REGEX, constraint)
+        if match:
+            constraint_parts = match.groupdict()
+            version_constraints.append(VersionConstraint(constraint_parts))
     return version_constraints
 
 
-def order_versions_in_descending_order(versions_strings):
+def order_versions_in_descending_order(versions_strings: List[str]) -> List[str]:
     """
     :param versions_strings: array of string versions: ["v1.2.3", "v1.2.4"...]
     :return: A sorted array of versions in descending order

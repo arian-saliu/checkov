@@ -1,3 +1,7 @@
+import json
+from typing import List
+
+from checkov.common.parsers.node import StrNode
 from checkov.common.models.enums import CheckResult, CheckCategories
 from checkov.cloudformation.checks.resource.base_resource_check import BaseResourceCheck
 
@@ -17,15 +21,19 @@ class ECRPolicy(BaseResourceCheck):
         :param conf: aws_ecr_repository configuration
         :return: <CheckResult>
         """
+        self.evaluated_keys = ["Properties/RepositoryPolicyText/Statement"]
         if 'Properties' in conf.keys():
             if 'RepositoryPolicyText' in conf['Properties'].keys():
-                if 'Statement' in conf['Properties']['RepositoryPolicyText'].keys():
-                    for statement in conf['Properties']['RepositoryPolicyText']['Statement']:
+                policy_text = conf['Properties']['RepositoryPolicyText']
+                if type(policy_text) in (str, StrNode):
+                    policy_text = json.loads(str(policy_text))
+                if 'Statement' in policy_text.keys():
+                    for statement_index, statement in enumerate(policy_text['Statement']):
                         if 'Principal' in statement.keys():
-                            for principal in statement['Principal']:
+                            for principal_index, principal in enumerate(statement['Principal']):
                                 if principal == "*":
+                                    self.evaluated_keys = [f"Properties/RepositoryPolicyText/Statement/[{statement_index}]/Principal/[{principal_index}]"]
                                     return CheckResult.FAILED
         return CheckResult.PASSED
-
 
 check = ECRPolicy()

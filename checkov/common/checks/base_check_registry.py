@@ -11,6 +11,7 @@ from checkov.common.checks.base_check import BaseCheck
 
 from collections import defaultdict
 
+from checkov.common.typing import _SkippedCheck
 from checkov.runner_filter import RunnerFilter
 
 
@@ -18,6 +19,7 @@ class BaseCheckRegistry(object):
     # NOTE: Needs to be static to because external check loading may be triggered by a registry to which
     #       checks aren't registered. (This happens with Serverless, for example.)
     __loading_external_checks = False
+    __all_registered_checks: List[BaseCheck] = []
 
     def __init__(self) -> None:
         self.logger = logging.getLogger(__name__)
@@ -44,6 +46,12 @@ class BaseCheckRegistry(object):
             checks = self.wildcard_checks if self._is_wildcard(entity) else self.checks
             if not any(c.id == check.id for c in checks[entity]):
                 checks[entity].append(check)
+
+        BaseCheckRegistry.__all_registered_checks.append(check)
+
+    @staticmethod
+    def get_all_registered_checks() -> List[BaseCheck]:
+        return BaseCheckRegistry.__all_registered_checks
 
     @staticmethod
     def _is_wildcard(entity: str) -> bool:
@@ -91,7 +99,7 @@ class BaseCheckRegistry(object):
         self,
         scanned_file: str,
         entity: Dict[str, Any],
-        skipped_checks: List[Dict[str, str]],
+        skipped_checks: List[_SkippedCheck],
         runner_filter: RunnerFilter,
     ) -> Dict[BaseCheck, Dict[str, Any]]:
 
@@ -104,12 +112,12 @@ class BaseCheckRegistry(object):
 
         checks = self.get_checks(entity_type)
         for check in checks:
-            skip_info = {}
+            skip_info: _SkippedCheck = {}
             if skipped_checks:
                 if check.id in [x["id"] for x in skipped_checks]:
                     skip_info = [x for x in skipped_checks if x["id"] == check.id][0]
 
-            if runner_filter.should_run_check(check.id):
+            if runner_filter.should_run_check(check.id, check.bc_id):
                 result = self.run_check(check, entity_configuration, entity_name, entity_type, scanned_file, skip_info)
                 results[check] = result
         return results
@@ -121,7 +129,7 @@ class BaseCheckRegistry(object):
         entity_name: str,
         entity_type: str,
         scanned_file: str,
-        skip_info: Dict[str, str],
+        skip_info: _SkippedCheck,
     ) -> Dict[str, Any]:
         self.logger.debug("Running check: {} on file {}".format(check.name, scanned_file))
         result = check.run(
@@ -140,7 +148,7 @@ class BaseCheckRegistry(object):
         __init__.py is needed to ensure the directory is a Python module, thus
         can be imported.
         """
-        return os.path.exists(f"{directory}/__init__.py")
+        return os.path.exists(os.path.join(directory, "__init__.py"))
 
     @staticmethod
     def _file_can_be_imported(entry: os.DirEntry) -> bool:
@@ -155,32 +163,32 @@ class BaseCheckRegistry(object):
         """
         directory = os.path.expanduser(directory)
         self.logger.debug("Loading external checks from {}".format(directory))
-        sys.path.insert(1, directory)
+        for root, _, _ in os.walk(directory):
+            sys.path.insert(1, root)
+            with os.scandir(root) as directory_content:
+                if not self._directory_has_init_py(root):
+                    self.logger.info("No __init__.py found in {}. Cannot load any check here.".format(root))
+                else:
+                    for entry in directory_content:
+                        if self._file_can_be_imported(entry):
+                            check_name = entry.name.replace(".py", "")
 
-        with os.scandir(directory) as directory_content:
-            if not self._directory_has_init_py(directory):
-                self.logger.info("No __init__.py found in {}. Cannot load any check here.".format(directory))
-            else:
-                for entry in directory_content:
-                    if self._file_can_be_imported(entry):
-                        check_name = entry.name.replace(".py", "")
-
-                        # Filter is set while loading external checks so the filter can be informed
-                        # of the checks, which need to be handled specially.
-                        try:
-                            BaseCheckRegistry.__loading_external_checks = True
-                            self.logger.debug("Importing external check '{}'".format(check_name))
-                            importlib.import_module(check_name)
-                        except SyntaxError as e:
-                            self.logger.error(
-                                "Cannot load external check '{check_name}' from {check_full_path} : {error_message} ("
-                                "{error_line}:{error_column}) ".format(
-                                    check_name=check_name,
-                                    check_full_path=e.args[1][0],
-                                    error_message=e.args[0],
-                                    error_line=e.args[1][1],
-                                    error_column=e.args[1][2],
+                            # Filter is set while loading external checks so the filter can be informed
+                            # of the checks, which need to be handled specially.
+                            try:
+                                BaseCheckRegistry.__loading_external_checks = True
+                                self.logger.debug("Importing external check '{}'".format(check_name))
+                                importlib.import_module(check_name)
+                            except SyntaxError as e:
+                                self.logger.error(
+                                    "Cannot load external check '{check_name}' from {check_full_path} : {error_message} ("
+                                    "{error_line}:{error_column}) ".format(
+                                        check_name=check_name,
+                                        check_full_path=e.args[1][0],
+                                        error_message=e.args[0],
+                                        error_line=e.args[1][1],
+                                        error_column=e.args[1][2],
+                                    )
                                 )
-                            )
-                        finally:
-                            BaseCheckRegistry.__loading_external_checks = False
+                            finally:
+                                BaseCheckRegistry.__loading_external_checks = False

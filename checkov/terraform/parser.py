@@ -1,22 +1,29 @@
-import copy
+import datetime
 import json
 import logging
 import os
 import re
 from copy import deepcopy
+from json import dumps, loads, JSONEncoder
 from pathlib import Path
-from typing import Optional, Dict, Mapping, Set, Tuple, Callable, Any, List
+from typing import Optional, Dict, Mapping, Set, Tuple, Callable, Any, List, Type
 
 import deep_merge
 import hcl2
+from lark import Tree
 
-from checkov.common.runners.base_runner import filter_ignored_directories
+from checkov.common.parallelizer.parallel_runner import parallel_runner
+from checkov.common.runners.base_runner import filter_ignored_paths
+from checkov.common.util.config_utils import should_scan_hcl_files
 from checkov.common.util.consts import DEFAULT_EXTERNAL_MODULES_DIR, RESOLVED_MODULE_ENTRY_NAME
+from checkov.common.util.json_utils import CustomJSONEncoder
 from checkov.common.variables.context import EvaluationContext
 from checkov.terraform.checks.utils.dependency_path_handler import unify_dependency_path
 from checkov.terraform.graph_builder.graph_components.block_types import BlockType
 from checkov.terraform.graph_builder.graph_components.module import Module
 from checkov.terraform.graph_builder.utils import remove_module_dependency_in_path
+from checkov.terraform.module_loading.content import ModuleContent
+from checkov.terraform.module_loading.module_finder import load_tf_modules
 from checkov.terraform.module_loading.registry import module_loader_registry as default_ml_registry, \
     ModuleLoaderRegistry
 from checkov.terraform.parser_utils import eval_string, find_var_blocks
@@ -24,15 +31,18 @@ from checkov.terraform.parser_utils import eval_string, find_var_blocks
 external_modules_download_path = os.environ.get('EXTERNAL_MODULES_DIR', DEFAULT_EXTERNAL_MODULES_DIR)
 
 
-def _filter_ignored_directories(d_names, excluded_paths):
-    filter_ignored_directories(d_names, excluded_paths)
-    [d_names.remove(d) for d in list(d_names) if d in [default_ml_registry.external_modules_folder_name]]
+def _filter_ignored_paths(root, paths, excluded_paths):
+    filter_ignored_paths(root, paths, excluded_paths)
+    [paths.remove(path) for path in list(paths) if path in [default_ml_registry.external_modules_folder_name]]
 
 
 class Parser:
-    def __init__(self, module_class=Module):
+    def __init__(self, module_class: Type[Module] = Module):
         self.module_class = module_class
         self._parsed_directories = set()
+        self.external_modules_source_map: Dict[Tuple[str, str], str] = {}
+        self.module_address_map: Dict[Tuple[str, str], str] = {}
+        self.loaded_files_map = {}
 
         # This ensures that we don't try to double-load modules
         # Tuple is <file>, <module_index>, <name> (see _load_modules)
@@ -45,7 +55,8 @@ class Parser:
               env_vars: Mapping[str, str],
               download_external_modules: bool,
               external_modules_download_path: str,
-              excluded_paths: Optional[List[str]] = None):
+              excluded_paths: Optional[List[str]] = None,
+              tf_var_files: Optional[List[str]] = None):
         self.directory = directory
         self.out_definitions = out_definitions
         self.out_evaluations_context = out_evaluations_context
@@ -53,6 +64,10 @@ class Parser:
         self.env_vars = env_vars
         self.download_external_modules = download_external_modules
         self.external_modules_download_path = external_modules_download_path
+        self.external_modules_source_map = {}
+        self.module_address_map = {}
+        self.tf_var_files = tf_var_files
+        self.scan_hcl = should_scan_hcl_files()
 
         if self.out_evaluations_context is None:
             self.out_evaluations_context = {}
@@ -75,23 +90,33 @@ class Parser:
                         env_vars: Mapping[str, str] = None,
                         download_external_modules: bool = False,
                         external_modules_download_path: str = DEFAULT_EXTERNAL_MODULES_DIR,
-                        excluded_paths: Optional[List[str]] = None):
+                        excluded_paths: Optional[List[str]] = None,
+                        vars_files: Optional[List[str]] = None,
+                        external_modules_content_cache: Optional[Dict[str, ModuleContent]] = None):
         self._init(directory, out_definitions, out_evaluations_context, out_parsing_errors, env_vars,
                    download_external_modules, external_modules_download_path, excluded_paths)
         self._parsed_directories.clear()
+        default_ml_registry.root_dir = directory
         default_ml_registry.download_external_modules = download_external_modules
         default_ml_registry.external_modules_folder_name = external_modules_download_path
-        self._parse_directory(dir_filter=lambda d: self._check_process_dir(d))
+        default_ml_registry.module_content_cache = external_modules_content_cache if external_modules_content_cache else {}
+        load_tf_modules(directory)
+        self._parse_directory(dir_filter=lambda d: self._check_process_dir(d), vars_files=vars_files)
 
-    @staticmethod
-    def parse_file(file: str, parsing_errors: Dict[str, Exception] = None) -> Optional[Dict]:
-        if not file.endswith(".tf") and not file.endswith(".tf.json"):
+    def parse_file(self, file: str, parsing_errors: Dict[str, Exception] = None, scan_hcl = False) -> Optional[Dict]:
+        if file.endswith(".tf") or file.endswith(".tf.json") or (scan_hcl and file.endswith(".hcl")):
+            parse_result = _load_or_die_quietly(Path(file), parsing_errors)
+            if parse_result:
+                parse_result = self._serialize_definitions(parse_result)
+                parse_result = self._clean_parser_types(parse_result)
+                return parse_result
+        else:
             return None
-        return _load_or_die_quietly(Path(file), parsing_errors)
 
     def _parse_directory(self, include_sub_dirs: bool = True,
                          module_loader_registry: ModuleLoaderRegistry = default_ml_registry,
-                         dir_filter: Callable[[str], bool] = lambda _: True):
+                         dir_filter: Callable[[str], bool] = lambda _: True,
+                         vars_files: Optional[List[str]] = None):
         """
     Load and resolve configuration files starting in the given directory, merging the
     resulting data into `tf_definitions`. This loads data according to the Terraform Code Organization
@@ -120,13 +145,15 @@ class Parser:
 
         if include_sub_dirs:
             for sub_dir, d_names, f_names in os.walk(self.directory):
-                _filter_ignored_directories(d_names, self.excluded_paths)
+                # filter subdirectories for future iterations (we filter files while iterating the directory)
+                _filter_ignored_paths(sub_dir, d_names, self.excluded_paths)
                 if dir_filter(os.path.abspath(sub_dir)):
                     self._internal_dir_load(sub_dir, module_loader_registry, dir_filter,
-                                            keys_referenced_as_modules)
+                                            keys_referenced_as_modules, vars_files=vars_files,
+                                            root_dir=self.directory, excluded_paths=self.excluded_paths)
         else:
             self._internal_dir_load(self.directory, module_loader_registry, dir_filter,
-                                    keys_referenced_as_modules)
+                                    keys_referenced_as_modules, vars_files=vars_files)
 
         # Ensure anything that was referenced as a module is removed
         for key in keys_referenced_as_modules:
@@ -138,7 +165,10 @@ class Parser:
                            dir_filter: Callable[[str], bool],
                            keys_referenced_as_modules: Set[str],
                            specified_vars: Optional[Mapping[str, str]] = None,
-                           module_load_context: Optional[str] = None):
+                           module_load_context: Optional[str] = None,
+                           vars_files: Optional[List[str]] = None,
+                           root_dir: Optional[str] = None,
+                           excluded_paths: Optional[List[str]] = None):
         """
     See `parse_directory` docs.
         :param directory:                  Directory in which .tf and .tfvars files will be loaded.
@@ -159,8 +189,15 @@ class Parser:
         var_value_and_file_map: Dict[str, Tuple[Any, str]] = {}
         hcl_tfvars: Optional[os.DirEntry] = None
         json_tfvars: Optional[os.DirEntry] = None
-        auto_vars_files: Optional[List[os.DirEntry]] = None  # lazy creation
-        for file in os.scandir(directory):
+        auto_vars_files: List[os.DirEntry] = []  # *.auto.tfvars / *.auto.tfvars.json
+        explicit_var_files: List[os.DirEntry] = []  # files passed with --var-file; only process the ones that are in this directory
+
+        dir_contents = list(os.scandir(directory))
+        if excluded_paths:
+            filter_ignored_paths(root_dir, dir_contents, excluded_paths)
+
+        tf_files_to_load = []
+        for file in dir_contents:
             # Ignore directories and hidden files
             try:
                 if not file.is_file() or file.name.startswith("."):
@@ -173,27 +210,23 @@ class Parser:
             # See: https://www.terraform.io/docs/configuration/variables.html#variable-definitions-tfvars-files
             if file.name == "terraform.tfvars.json":
                 json_tfvars = file
-                continue
             elif file.name == "terraform.tfvars":
                 hcl_tfvars = file
-                continue
             elif file.name.endswith(".auto.tfvars.json") or file.name.endswith(".auto.tfvars"):
-                if auto_vars_files is None:
-                    auto_vars_files = [file]
-                else:
-                    auto_vars_files.append(file)
-                continue
+                auto_vars_files.append(file)
+            elif vars_files and file.path in vars_files:
+                explicit_var_files.append(file)
 
             # Resource files
-            if file.name.endswith(".tf"):  # TODO: add support for .tf.json
-                data = _load_or_die_quietly(file, self.out_parsing_errors)
-            else:
-                continue
+            elif file.name.endswith(".tf") or (self.scan_hcl and file.name.endswith('.hcl')):  # TODO: add support for .tf.json
+                tf_files_to_load.append(file)
 
-            if not data:  # failed loads or empty files
-                continue
+        files_to_data = self._load_files(tf_files_to_load)
 
-            self.out_definitions[file.path] = data
+        for file, data in sorted(files_to_data, key=lambda x: x[0]):
+            if not data:
+                continue
+            self.out_definitions[file] = data
 
             # Load variable defaults
             #  (see https://www.terraform.io/docs/configuration/variables.html#declaring-an-input-variable)
@@ -208,8 +241,8 @@ class Parser:
 
                         default_value = var_definition.get("default")
                         if default_value is not None and isinstance(default_value, list):
-                            self.external_variables_data.append((var_name, default_value[0], file.path))
-                            var_value_and_file_map[var_name] = default_value[0], file.path
+                            self.external_variables_data.append((var_name, default_value[0], file))
+                            var_value_and_file_map[var_name] = default_value[0], file
 
         # Stage 2: Load vars in proper order:
         #          https://www.terraform.io/docs/configuration/variables.html#variable-definition-precedence
@@ -228,8 +261,7 @@ class Parser:
             var_value_and_file_map[key[7:]] = value, f"env:{key}"
             self.external_variables_data.append((key[7:], value, f"env:{key}"))
         if hcl_tfvars:  # terraform.tfvars
-            data = _load_or_die_quietly(hcl_tfvars, self.out_parsing_errors,
-                                        clean_definitions=False)
+            data = _load_or_die_quietly(hcl_tfvars, self.out_parsing_errors, clean_definitions=False)
             if data:
                 var_value_and_file_map.update({k: (_safe_index(v, 0), hcl_tfvars.path) for k, v in data.items()})
                 self.external_variables_data.extend([(k, _safe_index(v, 0), hcl_tfvars.path) for k, v in data.items()])
@@ -238,12 +270,20 @@ class Parser:
             if data:
                 var_value_and_file_map.update({k: (v, json_tfvars.path) for k, v in data.items()})
                 self.external_variables_data.extend([(k, v, json_tfvars.path) for k, v in data.items()])
-        if auto_vars_files:  # *.auto.tfvars / *.auto.tfvars.json
-            for var_file in sorted(auto_vars_files, key=lambda e: e.name):
-                data = _load_or_die_quietly(var_file, self.out_parsing_errors)
-                if data:
-                    var_value_and_file_map.update({k: (v, var_file.path) for k, v in data.items()})
-                    self.external_variables_data.extend([(k, v, var_file.path) for k, v in data.items()])
+
+        auto_var_files_to_data = self._load_files(auto_vars_files)
+        for var_file, data in sorted(auto_var_files_to_data, key=lambda x: x[0]):
+            if data:
+                var_value_and_file_map.update({k: (v, var_file) for k, v in data.items()})
+                self.external_variables_data.extend([(k, v, var_file) for k, v in data.items()])
+
+        explicit_var_files_to_data = self._load_files(explicit_var_files)
+        # it's possible that os.scandir returned the var files in a different order than they were specified
+        for var_file, data in sorted(explicit_var_files_to_data, key=lambda x: vars_files.index(x[0])):
+            if data:
+                var_value_and_file_map.update({k: (v, var_file) for k, v in data.items()})
+                self.external_variables_data.extend([(k, v, var_file) for k, v in data.items()])
+
         if specified_vars:  # specified
             var_value_and_file_map.update({k: (v, "manual specification") for k, v in specified_vars.items()})
             self.external_variables_data.extend([(k, v, "manual specification") for k, v in specified_vars.items()])
@@ -282,6 +322,33 @@ class Parser:
                 # If there are more modules to load but no variables were resolved, then to a final module
                 # load, forcing things through without complete resolution.
                 force_final_module_load = True
+
+    def _load_files(self, files):
+        def _load_file(file):
+            parsing_errors = {}
+            result = _load_or_die_quietly(file, parsing_errors)
+            # the exceptions type can un-pickleable
+            for path, e in parsing_errors.items():
+                parsing_errors[path] = Exception(str(e))
+
+            return (file.path, result), parsing_errors
+
+        files_to_data = []
+        files_to_parse = []
+        for file in files:
+            data = self.loaded_files_map.get(file.path)
+            if data:
+                files_to_data.append((file.path, data))
+            else:
+                files_to_parse.append(file)
+
+        results = parallel_runner.run_function(_load_file, files_to_parse)
+        for result, parsing_errors in results:
+            self.out_parsing_errors.update(parsing_errors)
+            files_to_data.append(result)
+            if result[0] not in self.loaded_files_map:
+                self.loaded_files_map[result[0]] = result[1]
+        return files_to_data
 
     def _load_modules(self, root_dir: str, module_loader_registry: ModuleLoaderRegistry,
                       dir_filter: Callable[[str], bool], module_load_context: Optional[str],
@@ -329,7 +396,7 @@ class Parser:
                         continue
 
                     # Variables being passed to module, "source" and "version" are reserved
-                    specified_vars = {k: v[0] for k, v in module_call_data.items()
+                    specified_vars = {k: v[0] if isinstance(v, list) else v for k, v in module_call_data.items()
                                       if k != "source" and k != "version"}
 
                     if not ignore_unresolved_params:
@@ -360,93 +427,125 @@ class Parser:
                     if version and isinstance(version, list):
                         version = version[0]
                     try:
-                        with module_loader_registry.load(root_dir, source, version) as content:
-                            if not content.loaded():
+                        content = module_loader_registry.load(root_dir, source, version)
+                        if not content.loaded():
+                            logging.info(f'Got no content for {source}:{version}')
+                            continue
+
+                        self._internal_dir_load(directory=content.path(),
+                                                module_loader_registry=module_loader_registry,
+                                                dir_filter=dir_filter, specified_vars=specified_vars,
+                                                module_load_context=module_load_context,
+                                                keys_referenced_as_modules=keys_referenced_as_modules)
+
+                        module_definitions = {path: self.out_definitions[path] for path in
+                                              list(self.out_definitions.keys()) if
+                                              os.path.dirname(path) == content.path()}
+
+                        if not module_definitions:
+                            continue
+
+                        # NOTE: Modules are put into the main TF definitions structure "as normal" with the
+                        #       notable exception of the file name. For loaded modules referrer information is
+                        #       appended to the file name to create this format:
+                        #         <file_name>[<referred_file>#<referrer_index>]
+                        #       For example:
+                        #         /the/path/module/my_module.tf[/the/path/main.tf#0]
+                        #       The referrer and index allow a module allow a module to be loaded multiple
+                        #       times with differing data.
+                        #
+                        #       In addition, the referring block will have a "__resolved__" key added with a
+                        #       list pointing to the location of the module data that was resolved. For example:
+                        #         "__resolved__": ["/the/path/module/my_module.tf[/the/path/main.tf#0]"]
+
+                        resolved_loc_list = module_call_data.get(RESOLVED_MODULE_ENTRY_NAME)
+                        if resolved_loc_list is None:
+                            resolved_loc_list = []
+                            module_call_data[RESOLVED_MODULE_ENTRY_NAME] = resolved_loc_list
+
+                        # NOTE: Modules can load other modules, so only append referrer information where it
+                        #       has not already been added.
+                        keys = list(module_definitions.keys())
+                        for key in keys:
+                            if key.endswith("]") or file.endswith("]"):
                                 continue
+                            keys_referenced_as_modules.add(key)
+                            new_key = f"{key}[{file}#{module_index}]"
+                            module_definitions[new_key] = module_definitions[key]
+                            del module_definitions[key]
+                            del self.out_definitions[key]
+                            if new_key not in resolved_loc_list:
+                                resolved_loc_list.append(new_key)
+                            if (file, module_call_name) not in self.module_address_map:
+                                self.module_address_map[(file, module_call_name)] = str(module_index)
+                        resolved_loc_list.sort()  # For testing, need predictable ordering
 
-                            self._internal_dir_load(directory=content.path(),
-                                                    module_loader_registry=module_loader_registry,
-                                                    dir_filter=dir_filter, specified_vars=specified_vars,
-                                                    module_load_context=module_load_context,
-                                                    keys_referenced_as_modules=keys_referenced_as_modules)
-
-                            module_definitions = {path: self.out_definitions[path] for path in
-                                                  list(self.out_definitions.keys()) if
-                                                  os.path.dirname(path) == content.path()}
-
-                            if not module_definitions:
-                                continue
-
-                            # NOTE: Modules are put into the main TF definitions structure "as normal" with the
-                            #       notable exception of the file name. For loaded modules referrer information is
-                            #       appended to the file name to create this format:
-                            #         <file_name>[<referred_file>#<referrer_index>]
-                            #       For example:
-                            #         /the/path/module/my_module.tf[/the/path/main.tf#0]
-                            #       The referrer and index allow a module allow a module to be loaded multiple
-                            #       times with differing data.
-                            #
-                            #       In addition, the referring block will have a "__resolved__" key added with a
-                            #       list pointing to the location of the module data that was resolved. For example:
-                            #         "__resolved__": ["/the/path/module/my_module.tf[/the/path/main.tf#0]"]
-
-                            resolved_loc_list = module_call_data.get(RESOLVED_MODULE_ENTRY_NAME)
-                            if resolved_loc_list is None:
-                                resolved_loc_list = []
-                                module_call_data[RESOLVED_MODULE_ENTRY_NAME] = resolved_loc_list
-
-                            # NOTE: Modules can load other modules, so only append referrer information where it
-                            #       has not already been added.
-                            keys = list(module_definitions.keys())
-                            for key in keys:
-                                if key.endswith("]") or file.endswith("]"):
-                                    continue
-                                keys_referenced_as_modules.add(key)
-                                new_key = f"{key}[{file}#{module_index}]"
-                                module_definitions[new_key] = module_definitions[key]
-                                del module_definitions[key]
-                                del self.out_definitions[key]
-                                if new_key not in resolved_loc_list:
-                                    resolved_loc_list.append(new_key)
-                            resolved_loc_list.sort()  # For testing, need predictable ordering
-
+                        if all_module_definitions:
                             deep_merge.merge(all_module_definitions, module_definitions)
+                        else:
+                            all_module_definitions = module_definitions
+
+                        self.external_modules_source_map[(source, version)] = content.path()
                     except Exception as e:
                         logging.warning("Unable to load module (source=\"%s\" version=\"%s\"): %s",
                                         source, version, e)
-                        pass
 
         if all_module_definitions:
             deep_merge.merge(self.out_definitions, all_module_definitions)
+        if all_module_evaluations_context:
             deep_merge.merge(self.out_evaluations_context, all_module_evaluations_context)
         return skipped_a_module
 
-    def parse_hcl_module(self, source_dir, source, download_external_modules=False, parsing_errors=None, excluded_paths: List[str]=None):
-        tf_definitions = {}
+    def parse_hcl_module(
+        self,
+        source_dir: str,
+        source: str,
+        download_external_modules: bool = False,
+        external_modules_download_path: str = DEFAULT_EXTERNAL_MODULES_DIR,
+        parsing_errors: Optional[Dict[str, Exception]] = None,
+        excluded_paths: Optional[List[str]] = None,
+        vars_files: Optional[List[str]] = None,
+        external_modules_content_cache: Optional[Dict[str, ModuleContent]] = None
+    ) -> Tuple[Module, Dict[str, Dict[str, Any]]]:
+        tf_definitions: Dict[str, Dict[str, Any]] = {}
         self.parse_directory(directory=source_dir, out_definitions=tf_definitions, out_evaluations_context={},
                              out_parsing_errors=parsing_errors if parsing_errors is not None else {},
                              download_external_modules=download_external_modules,
-                             external_modules_download_path=external_modules_download_path, excluded_paths=excluded_paths)
-        tf_definitions = Parser._hcl_boolean_types_to_boolean(tf_definitions)
-        return self.parse_hcl_module_from_tf_definitions(tf_definitions, source_dir, source)
+                             external_modules_download_path=external_modules_download_path, excluded_paths=excluded_paths,
+                             vars_files=vars_files, external_modules_content_cache=external_modules_content_cache)
+        tf_definitions = self._clean_parser_types(tf_definitions)
+        tf_definitions = self._serialize_definitions(tf_definitions)
 
-    def parse_hcl_module_from_tf_definitions(self, tf_definitions, source_dir, source, excluded_paths: List[str]=None):
+        module, tf_definitions = self.parse_hcl_module_from_tf_definitions(tf_definitions, source_dir, source)
+        return module, tf_definitions
+
+    def parse_hcl_module_from_tf_definitions(
+        self,
+        tf_definitions: Dict[str, Dict[str, Any]],
+        source_dir: str,
+        source: str,
+    ) -> Tuple[Module, Dict[str, Dict[str, Any]]]:
         module_dependency_map, tf_definitions, dep_index_mapping = self.get_module_dependency_map(tf_definitions)
-        module = self.get_new_module(source_dir, module_dependency_map, dep_index_mapping)
+        module = self.get_new_module(
+            source_dir=source_dir,
+            module_dependency_map=module_dependency_map,
+            module_address_map=self.module_address_map,
+            external_modules_source_map=self.external_modules_source_map,
+            dep_index_mapping=dep_index_mapping,
+        )
         self.add_tfvars(module, source)
         copy_of_tf_definitions = deepcopy(tf_definitions)
-        for file_path in copy_of_tf_definitions:
-            blocks = copy_of_tf_definitions.get(file_path)
+        for file_path, blocks in copy_of_tf_definitions.items():
             for block_type in blocks:
                 try:
                     module.add_blocks(block_type, blocks[block_type], file_path, source)
                 except Exception as e:
                     logging.error(f'Failed to add block {blocks[block_type]}. Error:')
                     logging.error(e, exc_info=True)
-        return module, module_dependency_map, tf_definitions
+        return module, tf_definitions
 
     @staticmethod
-    def _hcl_boolean_types_to_boolean(conf: dict) -> dict:
+    def _clean_parser_types(conf: dict) -> dict:
         sorted_keys = list(conf.keys())
         if len(conf.keys()) > 0 and all(isinstance(x, type(list(conf.keys())[0])) for x in conf.keys()):
             sorted_keys = sorted(filter(lambda x: x is not None, conf.keys()))
@@ -456,31 +555,41 @@ class Parser:
             if attribute == 'alias':
                 continue
             if isinstance(values, list):
-                sorted_conf[attribute] = Parser._hcl_boolean_types_to_boolean_lst(values)
+                sorted_conf[attribute] = Parser._clean_parser_types_lst(values)
             elif isinstance(values, dict):
-                sorted_conf[attribute] = Parser._hcl_boolean_types_to_boolean(conf[attribute])
+                sorted_conf[attribute] = Parser._clean_parser_types(conf[attribute])
             elif isinstance(values, str) and values in ('true', 'false'):
                 sorted_conf[attribute] = True if values == 'true' else False
+            elif isinstance(values, set):
+                sorted_conf[attribute] = Parser._clean_parser_types_lst(list(values))
+            elif isinstance(values, Tree):
+                sorted_conf[attribute] = str(values)
         return sorted_conf
 
     @staticmethod
-    def _hcl_boolean_types_to_boolean_lst(values: list) -> list:
+    def _clean_parser_types_lst(values: list) -> list:
         for i in range(len(values)):
             val = values[i]
             if isinstance(val, dict):
-                values[i] = Parser._hcl_boolean_types_to_boolean(val)
+                values[i] = Parser._clean_parser_types(val)
             elif isinstance(val, list):
-                values[i] = Parser._hcl_boolean_types_to_boolean_lst(val)
+                values[i] = Parser._clean_parser_types_lst(val)
             elif isinstance(val, str):
                 if val == 'true':
                     values[i] = True
                 elif val == 'false':
                     values[i] = False
+            elif isinstance(val, set):
+                values[i] = Parser._clean_parser_types_lst(list(val))
         str_values_in_lst = [val for val in values if isinstance(val, str)]
         str_values_in_lst.sort()
         result_values = [val for val in values if not isinstance(val, str)]
         result_values.extend(str_values_in_lst)
         return result_values
+
+    @staticmethod
+    def _serialize_definitions(tf_definitions):
+        return loads(dumps(tf_definitions, cls=CustomJSONEncoder))
 
     @staticmethod
     def get_next_vertices(evaluated_files: list, unevaluated_files: list) -> (list, list):
@@ -533,10 +642,9 @@ class Parser:
         """
         module_dependency_map = {}
         copy_of_tf_definitions = {}
-        dep_index_mapping = {}
-        definitions_keys = list(tf_definitions.keys())
-        origin_keys = list(filter(lambda k: not k.endswith(']'), definitions_keys))
-        unevaluated_keys = list(filter(lambda k: k.endswith(']'), definitions_keys))
+        dep_index_mapping: Dict[Tuple[str, str], List[str]] = {}
+        origin_keys = list(filter(lambda k: not k.endswith(']'), tf_definitions.keys()))
+        unevaluated_keys = list(filter(lambda k: k.endswith(']'), tf_definitions.keys()))
         for file_path in origin_keys:
             dir_name = os.path.dirname(file_path)
             module_dependency_map[dir_name] = [[]]
@@ -556,23 +664,35 @@ class Parser:
                     module_dependency_map[dir_name] += current_deps
                 copy_of_tf_definitions[path] = deepcopy(tf_definitions[file_path])
                 origin_keys.append(path)
-                dep_index_mapping[path] = module_dependency_num
+                dep_index_mapping.setdefault((path, module_dependency), []).append(module_dependency_num)
             next_level, unevaluated_keys = Parser.get_next_vertices(origin_keys, unevaluated_keys)
         for key, dep_trails in module_dependency_map.items():
             hashes = set()
             deduped = []
             for trail in dep_trails:
-                hash = unify_dependency_path(trail)
-                if hash in hashes:
+                trail_hash = unify_dependency_path(trail)
+                if trail_hash in hashes:
                     continue
-                hashes.add(hash)
+                hashes.add(trail_hash)
                 deduped.append(trail)
             module_dependency_map[key] = deduped
         return module_dependency_map, copy_of_tf_definitions, dep_index_mapping
 
     @staticmethod
-    def get_new_module(source_dir, module_dependency_map, dep_index_mapping):
-        return Module(source_dir, module_dependency_map, dep_index_mapping, encode=False)
+    def get_new_module(
+            source_dir: str,
+            module_dependency_map: Dict[str, List[List[str]]],
+            module_address_map: Dict[Tuple[str, str], str],
+            external_modules_source_map: Dict[Tuple[str, str], str],
+            dep_index_mapping: Dict[Tuple[str, str], List[str]],
+    ) -> Module:
+        return Module(
+            source_dir=source_dir,
+            module_dependency_map=module_dependency_map,
+            module_address_map=module_address_map,
+            external_modules_source_map=external_modules_source_map,
+            dep_index_mapping=dep_index_mapping
+        )
 
     def add_tfvars(self, module, source):
         if not self.external_variables_data:
@@ -594,18 +714,20 @@ Load JSON or HCL, depending on filename.
     file_name = os.path.basename(file_path)
 
     try:
-        with open(file, "r") as f:
+        logging.debug(f"Parsing {file_path}")
+
+        with open(file_path, "r") as f:
             if file_name.endswith(".json"):
                 return json.load(f)
             else:
                 raw_data = hcl2.load(f)
-                non_malformed_definitions = _validate_malformed_definitions(raw_data)
+                non_malformed_definitions = validate_malformed_definitions(raw_data)
                 if clean_definitions:
-                    return _clean_bad_definitions(non_malformed_definitions)
+                    return clean_bad_definitions(non_malformed_definitions)
                 else:
                     return non_malformed_definitions
     except Exception as e:
-        logging.debug(f'failed while parsing file {file}', exc_info=e)
+        logging.debug(f'failed while parsing file {file_path}', exc_info=e)
         parsing_errors[file_path] = e
         return None
 
@@ -613,21 +735,26 @@ Load JSON or HCL, depending on filename.
 def _is_valid_block(block):
     if not isinstance(block, dict):
         return True
+
+    # if the block is empty, there's no need to process it further
+    if len(block) == 0:
+        return False
+
     entity_name, _ = next(iter(block.items()))
     if re.fullmatch(r'[^\W0-9][\w-]*', entity_name):
         return True
     return False
 
 
-def _validate_malformed_definitions(raw_data):
-    raw_data_cleaned = copy.deepcopy(raw_data)
+def validate_malformed_definitions(raw_data):
+    raw_data_cleaned = raw_data
     for block_type, blocks in raw_data.items():
         raw_data_cleaned[block_type] = [block for block in blocks if _is_valid_block(block)]
 
     return raw_data_cleaned
 
 
-def _clean_bad_definitions(tf_definition_list):
+def clean_bad_definitions(tf_definition_list):
     return {
         block_type: list(filter(lambda definition_list: block_type == 'locals' or
                                                         not isinstance(definition_list, dict)
@@ -682,7 +809,7 @@ def is_acceptable_module_param(value: Any) -> bool:
                 return False
         return True
 
-    if not value_type is str:
+    if value_type is not str:
         return True
 
     for vbm in find_var_blocks(value):

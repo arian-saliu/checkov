@@ -11,17 +11,17 @@ from yaml import YAMLError
 
 from checkov.cloudformation.parser import cfn_yaml
 from checkov.cloudformation.context_parser import ContextParser
-from checkov.cloudformation.parser.node import dict_node, str_node
+from checkov.common.parsers.node import DictNode, StrNode
 
 logger = logging.getLogger(__name__)
 
-IAM_ROLE_STATEMENTS_TOKEN = 'iamRoleStatements' #nosec
-CFN_RESOURCES_TOKEN = 'resources' #nosec
-PROVIDER_TOKEN = 'provider' #nosec
-FUNCTIONS_TOKEN = 'functions' #nosec
-ENVIRONMENT_TOKEN = 'environment' #nosec
-STACK_TAGS_TOKEN = 'stackTags' #nosec
-TAGS_TOKEN = 'tags' #nosec
+IAM_ROLE_STATEMENTS_TOKEN = 'iamRoleStatements'  # nosec
+CFN_RESOURCES_TOKEN = 'resources'  # nosec
+PROVIDER_TOKEN = 'provider'  # nosec
+FUNCTIONS_TOKEN = 'functions'  # nosec
+ENVIRONMENT_TOKEN = 'environment'  # nosec
+STACK_TAGS_TOKEN = 'stackTags'  # nosec
+TAGS_TOKEN = 'tags'  # nosec
 SUPPORTED_PROVIDERS = ['aws']
 
 DEFAULT_VAR_PATTERN = r"\${([^{}]+?)}"
@@ -33,7 +33,7 @@ def parse(filename):
     template = None
     template_lines = None
     try:
-        (template, template_lines) = cfn_yaml.load(filename)
+        (template, template_lines) = cfn_yaml.load(filename, cfn_yaml.ContentType.SLS)
         if not template or not is_checked_sls_template(template):
             return
     except IOError as e:
@@ -63,11 +63,11 @@ def parse(filename):
 def is_checked_sls_template(template):
     if template.__contains__('provider'):
         # Case provider is a dictionary
-        if isinstance(template['provider'], dict_node):
+        if isinstance(template['provider'], DictNode):
             if template['provider'].get('name').lower() not in SUPPORTED_PROVIDERS:
                 return False
         # Case provider is direct provider name
-        if isinstance(template['provider'], str_node):
+        if isinstance(template['provider'], StrNode):
             if template['provider'] not in SUPPORTED_PROVIDERS:
                 return False
         return True
@@ -75,7 +75,7 @@ def is_checked_sls_template(template):
 
 
 def template_contains_cfn_resources(template):
-    if template.__contains__(CFN_RESOURCES_TOKEN) and isinstance(template[CFN_RESOURCES_TOKEN], dict_node):
+    if template.__contains__(CFN_RESOURCES_TOKEN) and isinstance(template[CFN_RESOURCES_TOKEN], DictNode):
         if template[CFN_RESOURCES_TOKEN].get('Resources'):
             return True
     return False
@@ -255,7 +255,7 @@ def _load_file_data(file_location, file_data_cache, service_file_directory):
                     data = json.load(f)
                 elif file_location.endswith(".yml") or file_location.endswith(".yaml"):
                     data = yaml.safe_load(f)
-        except:
+        except Exception:
             data = {}
         file_data_cache[file_location] = data
     return data

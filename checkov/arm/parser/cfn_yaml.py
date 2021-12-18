@@ -3,7 +3,9 @@ Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 SPDX-License-Identifier: MIT-0
 """
 import logging
-import six
+from pathlib import Path
+from typing import Tuple, List
+
 from yaml import MappingNode
 from yaml import ScalarNode
 from yaml import SequenceNode
@@ -15,7 +17,7 @@ from yaml.reader import Reader
 from yaml.resolver import Resolver
 from yaml.scanner import Scanner
 
-from checkov.arm.parser.node import str_node, dict_node, list_node
+from checkov.common.parsers.node import StrNode, DictNode, ListNode
 
 try:
     from yaml.cyaml import CParser as Parser  # pylint: disable=ungrouped-imports
@@ -86,17 +88,17 @@ class NodeConstructor(SafeConstructor):
             mapping[key] = value
 
         obj, = SafeConstructor.construct_yaml_map(self, node)
-        return dict_node(obj, node.start_mark, node.end_mark)
+        return DictNode(obj, node.start_mark, node.end_mark)
 
     def construct_yaml_str(self, node):
         obj = SafeConstructor.construct_yaml_str(self, node)
-        assert isinstance(obj, (six.string_types))  # nosec
-        return str_node(obj, node.start_mark, node.end_mark)
+        assert isinstance(obj, str)  # nosec
+        return StrNode(obj, node.start_mark, node.end_mark)
 
     def construct_yaml_seq(self, node):
         obj, = SafeConstructor.construct_yaml_seq(self, node)
         assert isinstance(obj, list) # nosec
-        return list_node(obj, node.start_mark, node.end_mark) # nosec
+        return ListNode(obj, node.start_mark, node.end_mark) # nosec
 
     #def construct_yaml_null_error(self, node):
     #    """Throw a null error"""
@@ -177,7 +179,7 @@ def multi_constructor(loader, tag_suffix, node):
     else:
         raise 'Bad tag: !{}'.format(tag_suffix)
 
-    return dict_node({tag_suffix: constructor(node)}, node.start_mark, node.end_mark)
+    return DictNode({tag_suffix: constructor(node)}, node.start_mark, node.end_mark)
 
 
 def construct_getatt(node):
@@ -185,10 +187,10 @@ def construct_getatt(node):
     Reconstruct !GetAtt into a list
     """
 
-    if isinstance(node.value, (six.string_types)):
-        return list_node(node.value.split('.'), node.start_mark, node.end_mark)
+    if isinstance(node.value, str):
+        return ListNode(node.value.split('.'), node.start_mark, node.end_mark)
     if isinstance(node.value, list):
-        return list_node([s.value for s in node.value], node.start_mark, node.end_mark)
+        return ListNode([s.value for s in node.value], node.start_mark, node.end_mark)
 
     raise ValueError('Unexpected node type: {}'.format(type(node.value)))
 
@@ -208,17 +210,17 @@ def loads(yaml_string, fname=None):
     return template
 
 
-def load(filename):
+def load(filename: Path) -> Tuple[DictNode, List[Tuple[int, str]]]:
     """
     Load the given YAML file
     """
 
-    content = ''
+    file_path = filename if isinstance(filename, Path) else Path(filename)
+    content = file_path.read_text()
 
-    with open(filename) as fp:
-        content = fp.read()
-        fp.seek(0)
-        file_lines = [(ind + 1, line) for (ind, line) in
-                      list(enumerate(fp.readlines()))]
+    if not all(key in content for key in ("$schema", "contentVersion")):
+        return {}, []
+
+    file_lines = [(idx + 1, line) for idx, line in enumerate(content.splitlines(keepends=True))]
 
     return (loads(content, filename), file_lines)

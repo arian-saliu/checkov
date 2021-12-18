@@ -17,12 +17,10 @@ Here is a basic example:
 ```yaml
 stages:
     - test
-variables: 
-  ALLOWFAILURE: true #True for AutoDevOps compatibility
-
+    
 checkov:
   stage: test
-  allow_failure: $ALLOWFAILURE
+  allow_failure: true  # True for AutoDevOps compatibility
   image:
     name: bridgecrew/checkov:latest
     entrypoint:
@@ -33,13 +31,13 @@ checkov:
       when: never
     - if: $CI_COMMIT_BRANCH
       exists:
-      - '**/*.yml'
-      - '**/*.yaml'
-      - '**/*.json'
-      - '**/*.template'
-      - '**/*.tf'      
-      - '**/serverless.yml'
-      - '**/serverless.yaml'
+        - '**/*.yml'
+        - '**/*.yaml'
+        - '**/*.json'
+        - '**/*.template'
+        - '**/*.tf'      
+        - '**/serverless.yml'
+        - '**/serverless.yaml'
   script:
     - checkov -d . -o junitxml | tee checkov.test.xml
   artifacts:
@@ -72,12 +70,10 @@ Note that in the examples above, the output of the test results does not display
 ```yaml
 stages:
     - test
-variables: 
-  ALLOWFAILURE: true #True for AutoDevOps compatibility
 
 checkov:
   stage: test
-  allow_failure: $ALLOWFAILURE
+  allow_failure: true  # True for AutoDevOps compatibility
   image:
     name: bridgecrew/checkov:latest
     entrypoint:
@@ -88,13 +84,13 @@ checkov:
       when: never
     - if: $CI_COMMIT_BRANCH
       exists:
-      - '**/*.yml'
-      - '**/*.yaml'
-      - '**/*.json'
-      - '**/*.template'
-      - '**/*.tf'      
-      - '**/serverless.yml'
-      - '**/serverless.yaml'
+        - '**/*.yml'
+        - '**/*.yaml'
+        - '**/*.json'
+        - '**/*.template'
+        - '**/*.tf'      
+        - '**/serverless.yml'
+        - '**/serverless.yaml'
   script:
     # Use `script` to emulate `tty` for colored output.
     - script -q -c 'checkov -d . ; echo $? > CKVEXIT'
@@ -107,4 +103,4 @@ checkov:
 ```
 
 See the [GitLab CI documentation](https://docs.gitlab.com/ee/ci/) for additional information.
-The there is also a working example of using GitLab CI with Checkov [here](https://gitlab.com/guided-explorations/ci-cd-plugin-extensions/checkov-iac-sast).  This example shows how to use the same Checkov YAML file as an includable extension so that all your jobs reuse the same job definition.
+There is also a working example of using GitLab CI with Checkov [here](https://gitlab.com/guided-explorations/ci-cd-plugin-extensions/checkov-iac-sast).  This example shows how to use the same Checkov YAML file as an includable extension so that all your jobs reuse the same job definition.

@@ -13,7 +13,7 @@ A YAML-based custom policy for Checkov consists of sections for the **Metadata**
 
 ![](policy-definition.png)
 
-### Metadata
+**Metadata**
 
 The Metadata includes:
 
@@ -33,7 +33,7 @@ The possible values for category are:
 * SECRETS
 * KUBERNETES
 
-### Policy Definition
+## Policy Definition
 
 The policy definition consists of:
 
@@ -47,7 +47,7 @@ The policy definition consists of:
 * **Attribute Blocks:** The policy describes resources with a certain configuration as defined by a configuration **attribute** and its value (per Terraform), or by the presence/absence of an attribute.
 * **Connection State Blocks** - The policy describes resources in a particular **Connection state**; either connected or not connected to another type of resource (for example, a security group).
 
-#### Using AND/OR Logic
+### Using AND/OR Logic
 A policy definition may include multiple blocks (**Attribute**, **Connection state** or both), associated by **AND/OR** logic.
 
 ## Attribute Blocks
@@ -76,14 +76,22 @@ definition:
 | ----- | ----- |
 | Equals | `equals` |
 | Not Equals | `not_equals` |
+| Regex Match | `regex_match` |
+| Not Regex Match | `not_regex_match` |
 | Exists | `exists` |
 | Not Exists | `not_exists` |
+| Any | `any` |
 | Contains | `contains` |
 | Not Contains | `not_contains` |
+| Within | `within` |
 | Starts With | `starting_with` |
-| Not Starts with | `not_starting_with` |
+| Not Starts With | `not_starting_with` |
 | Ends With | `ending_with` |
 | Not Ends With | `not_ending_with` |
+| Greater Than | `greater_than` |
+| Greater Than Or Equal | `greater_than_or_equal` |
+| Less Than | `less_than` |
+| Less Than Or Equal | `less_than_or_equal` |
 
 ### Attribute Condition: Keys and Values
 
@@ -92,7 +100,7 @@ definition:
 | `cond_type` | string | Must be `attribute` |
 | `resource_type` | collection of strings | Use either `all` or `[resource types from list]` |
 | `attribute` | string | Attribute of defined resource types. For example, `automated_snapshot_retention_period` |
-| `operator` | string | - `equals`, `not_equals`, `exists`, `not exists`, `contains`, `not_contains`, `starting_with`, `not_starting_with`, `ending_with`, `not_ending_with` |
+| `operator` | string | - `equals`, `not_equals`, `regex_match`, `not_regex_match`, `exists`, `not exists`, `any`, `contains`, `not_contains`, `within`, `starting_with`, `not_starting_with`, `ending_with`, `not_ending_with`, `greater_than`, `greater_than_or_equal`, `less_than`, `less_than_or_equal` |
 | `value` (not relevant for operator: `exists`/`not_exists`) | string | User input. |
 
 
@@ -153,13 +161,13 @@ The Custom Policy in this example ensures that all ELBs are attached to security
 | Not Exists | `not_exists` |
 
 ```yaml
-defintion:
+definition:
  and:
       - cond_type: "filter"
-        resource_types:
+        attribute: "resource_type"
+        value:
            - "aws_elb"
-        attribute: “resource_type”
-        operator: "within”
+        operator: "within"
       - cond_type: "connection"
         resource_types:
            - "aws_elb"
@@ -171,7 +179,7 @@ defintion:
 
 *Note: The condition above uses AND logic. See [additional examples](https://www.checkov.io/3.Custom%20Policies/Examples.html) for complex logic in policy definitions.*
 
-### Using AND/OR Logic
+## Using AND/OR Logic
 
 The Bridgecrew platform allows you to combine definition blocks using AND/OR operators.
 
@@ -179,7 +187,7 @@ The Bridgecrew platform allows you to combine definition blocks using AND/OR ope
 * Filter blocks apply (only) to the top-level and constitute an AND condition. For example, if you'd like to indicate a requirement for a Connection State between types of resources, but only within a certain subset of all of those resources.
 Every other logical operator applies within a collection. For example, you can use AND/OR logic in a collection of key-value pairs.
 
-#### Example
+### Example
 
 The logic in the policy definition shown below is:
 `AND[block 1,block 2,OR[block 3,block 4]]`.

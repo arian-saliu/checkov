@@ -17,7 +17,7 @@ class BaseCloudsplainingIAMCheck(BaseResourceCheck):
             "AWS::IAM::Role", "AWS::IAM::User"])
 
     def scan_resource_conf(self, conf):
-        if 'Properties' in conf.keys():
+        if conf.get('Properties'):
             props_conf = conf['Properties']
             policies_key = 'Policies'
 
@@ -40,9 +40,9 @@ class BaseCloudsplainingIAMCheck(BaseResourceCheck):
                             policy_statement = PolicyDocument(converted_policy_doc)
                             violations = self.cloudsplaining_analysis(policy_statement)
                             if violations:
-                                logging.debug("detailed cloudsplainging finding: {}",json.dumps(violations))
+                                logging.debug("detailed cloudsplaining finding: {}",json.dumps(violations))
                                 return CheckResult.FAILED
-                    except Exception as e:
+                    except Exception:
                         # this might occur with templated iam policies where ARN is not in place or similar
                         logging.debug("could not run cloudsplaining analysis on policy {}", conf)
                         return CheckResult.UNKNOWN

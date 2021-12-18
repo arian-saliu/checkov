@@ -11,20 +11,22 @@ class AzureInstancePassword(BaseResourceCheck):
         super().__init__(name=name, id=id, categories=categories, supported_resources=supported_resources)
 
     def scan_resource_conf(self, conf):
-        if "properties" in conf:
-            if "storageProfile" in conf["properties"]:
-                if "imageReference" in conf["properties"]["storageProfile"]:
-                    if "publisher" in conf["properties"]["storageProfile"]["imageReference"]:
-                        if "windows" in conf["properties"]["storageProfile"]["imageReference"]["publisher"].lower():
-                            # This check is not relevant to Windows systems
-                            return CheckResult.PASSED
+        properties = conf.get("properties")
+        if isinstance(properties, dict):
+            storage_profile = properties.get("storageProfile")
+            if isinstance(storage_profile, dict):
+                image_reference = storage_profile.get("imageReference")
+                if isinstance(image_reference, dict):
+                    publisher = image_reference.get("publisher")
+                    if publisher and "windows" in publisher.lower():
+                        # This check is not relevant to Windows systems
+                        return CheckResult.PASSED
 
-            if "osProfile" in conf["properties"]:
-                if "linuxConfiguration" in conf["properties"]["osProfile"]:
-                    if conf["properties"]["osProfile"]["linuxConfiguration"] != None and \
-                            "disablePasswordAuthentication" in conf["properties"]["osProfile"]["linuxConfiguration"]:
-                        if str(conf["properties"]["osProfile"]["linuxConfiguration"]["disablePasswordAuthentication"]).lower() == "true":
-                            return CheckResult.PASSED
+            os_profile = properties.get("osProfile")
+            if isinstance(os_profile, dict):
+                linux_conf = os_profile.get("linuxConfiguration")
+                if isinstance(linux_conf, dict) and linux_conf.get("disablePasswordAuthentication"):
+                    return CheckResult.PASSED
         return CheckResult.FAILED
 
 check = AzureInstancePassword()

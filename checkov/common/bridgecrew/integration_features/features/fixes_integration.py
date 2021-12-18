@@ -7,9 +7,8 @@ import requests
 
 from checkov.common.bridgecrew.integration_features.base_integration_feature import BaseIntegrationFeature
 from checkov.common.bridgecrew.platform_integration import bc_integration
-from checkov.common.util.dict_utils import merge_dicts
-from checkov.common.util.http_utils import get_auth_header, extract_error_message, \
-    get_default_post_headers
+from checkov.common.util.data_structures_utils import merge_dicts
+from checkov.common.util.http_utils import extract_error_message, get_default_post_headers
 
 SUPPORTED_FIX_FRAMEWORKS = ['terraform', 'cloudformation']
 
@@ -18,14 +17,20 @@ class FixesIntegration(BaseIntegrationFeature):
 
     def __init__(self, bc_integration):
         super().__init__(bc_integration, order=10)
+        self.fixes_url = f"{self.bc_integration.api_url}/api/v1/fixes/checkov"
 
     def is_valid(self):
-        return self.bc_integration.is_integration_configured() and not self.bc_integration.skip_fixes
+        return self.bc_integration.is_integration_configured() and not self.bc_integration.skip_fixes \
+               and not self.integration_feature_failures
 
-    def post_scan(self, scan_report):
-        if scan_report.check_type not in SUPPORTED_FIX_FRAMEWORKS:
-            return
-        self._get_platform_fixes(scan_report)
+    def post_runner(self, scan_report):
+        try:
+            if scan_report.check_type not in SUPPORTED_FIX_FRAMEWORKS:
+                return
+            self._get_platform_fixes(scan_report)
+        except Exception as e:
+            self.integration_feature_failures = True
+            logging.debug(f'{e} \nFixes will not be applied.', exc_info=True)
 
     def _get_platform_fixes(self, scan_report):
 
@@ -33,17 +38,15 @@ class FixesIntegration(BaseIntegrationFeature):
         # with repo size issues. Because the primary use case for this at the moment is VSCode integration, which
         # runs one file at a time, this can wait.
 
-        sorted_by_file = sorted(scan_report.failed_checks, key=lambda c: c.repo_file_path)
-        for file, failed_checks in groupby(sorted_by_file, key=lambda c: c.repo_file_path):
+        sorted_by_file = sorted(scan_report.failed_checks, key=lambda c: c.file_abs_path)
+        for file, failed_checks in groupby(sorted_by_file, key=lambda c: c.file_abs_path):
             failed_checks = [fc for fc in failed_checks if fc.check_id in self.bc_integration.ckv_to_bc_id_mapping]
             if not failed_checks:
                 continue
-            # file path always starts with /
-            file_abs_path = os.path.abspath(os.path.join(os.getcwd(), file[1:]))
-            with open(file_abs_path, 'r') as reader:
+            with open(file, 'r') as reader:
                 file_contents = reader.read()
 
-            fixes = self._get_fixes_for_file(file, file_contents, failed_checks)
+            fixes = self._get_fixes_for_file(scan_report.check_type, file, file_contents, failed_checks)
             if not fixes:
                 continue
             all_fixes = fixes['fixes']
@@ -57,7 +60,7 @@ class FixesIntegration(BaseIntegrationFeature):
                 failed_check = failed_check_by_check_resource[(ckv_id, fix['resourceId'])]
                 failed_check.fixed_definition = fix['fixedDefinition']
 
-    def _get_fixes_for_file(self, filename, file_contents, failed_checks):
+    def _get_fixes_for_file(self, check_type, filename, file_contents, failed_checks):
 
         errors = list(map(lambda c: {
             'resourceId': c.resource,
@@ -69,12 +72,13 @@ class FixesIntegration(BaseIntegrationFeature):
         payload = {
             'filePath': filename,
             'fileContent': file_contents,
+            'framework': check_type,
             'errors': errors
         }
 
         headers = merge_dicts(
             get_default_post_headers(self.bc_integration.bc_source, self.bc_integration.bc_source_version),
-            get_auth_header(self.bc_integration.bc_api_key)
+            {"Authorization": self.bc_integration.get_auth_token()}
         )
 
         response = requests.request('POST', self.fixes_url, headers=headers, json=payload)

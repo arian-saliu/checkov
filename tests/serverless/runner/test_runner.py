@@ -19,7 +19,7 @@ class TestRunnerValid(unittest.TestCase):
         scan_dir_path = os.path.join(current_dir, "resources")
 
         # this is the relative path to the directory to scan (what would actually get passed to the -d arg)
-        dir_rel_path = os.path.relpath(scan_dir_path)
+        dir_rel_path = os.path.relpath(scan_dir_path).replace('\\', '/')
 
         runner = Runner()
         checks_allowlist = ['CKV_AWS_49']
@@ -27,7 +27,7 @@ class TestRunnerValid(unittest.TestCase):
                             runner_filter=RunnerFilter(framework='serverless', checks=checks_allowlist))
 
         all_checks = report.failed_checks + report.passed_checks
-        self.assertTrue(len(all_checks) > 0)  # ensure that the assertions below are going to do something
+        self.assertGreater(len(all_checks), 0)  # ensure that the assertions below are going to do something
         for record in all_checks:
             # no need to join with a '/' because the CFN runner adds it to the start of the file path
             self.assertEqual(record.repo_file_path, f'/{dir_rel_path}{record.file_path}')
@@ -40,7 +40,7 @@ class TestRunnerValid(unittest.TestCase):
         current_dir = os.path.dirname(os.path.realpath(__file__))
         scan_dir_path = os.path.join(current_dir, "resources")
 
-        dir_rel_path = os.path.relpath(scan_dir_path)
+        dir_rel_path = os.path.relpath(scan_dir_path).replace('\\', '/')
 
         dir_abs_path = os.path.abspath(scan_dir_path)
 
@@ -50,7 +50,7 @@ class TestRunnerValid(unittest.TestCase):
                             runner_filter=RunnerFilter(framework='serverless', checks=checks_allowlist))
 
         all_checks = report.failed_checks + report.passed_checks
-        self.assertTrue(len(all_checks) > 0)  # ensure that the assertions below are going to do something
+        self.assertGreater(len(all_checks), 0)  # ensure that the assertions below are going to do something
         for record in all_checks:
             # no need to join with a '/' because the CFN runner adds it to the start of the file path
             self.assertEqual(record.repo_file_path, f'/{dir_rel_path}{record.file_path}')
@@ -72,7 +72,7 @@ class TestRunnerValid(unittest.TestCase):
                             runner_filter=RunnerFilter(framework='serverless', checks=checks_allowlist))
 
         all_checks = report.failed_checks + report.passed_checks
-        self.assertTrue(len(all_checks) > 0)  # ensure that the assertions below are going to do something
+        self.assertGreater(len(all_checks), 0)  # ensure that the assertions below are going to do something
         for record in all_checks:
             # no need to join with a '/' because the CFN runner adds it to the start of the file path
             self.assertEqual(record.repo_file_path, f'/{file_rel_path}')
@@ -94,7 +94,7 @@ class TestRunnerValid(unittest.TestCase):
                             runner_filter=RunnerFilter(framework='serverless', checks=checks_allowlist))
 
         all_checks = report.failed_checks + report.passed_checks
-        self.assertTrue(len(all_checks) > 0)  # ensure that the assertions below are going to do something
+        self.assertGreater(len(all_checks), 0)  # ensure that the assertions below are going to do something
         for record in all_checks:
             # no need to join with a '/' because the CFN runner adds it to the start of the file path
             self.assertEqual(record.repo_file_path, f'/{file_rel_path}')
@@ -115,6 +115,16 @@ class TestRunnerValid(unittest.TestCase):
                         check_imports.append({file.name: wrong_import})
 
         assert len(check_imports) == 0, f"Wrong imports were added: {check_imports}"
+
+    def test_provider_function_att_type_mismatch(self):
+        runner = Runner()
+        current_dir = os.path.dirname(os.path.realpath(__file__))
+        scan_file_path = os.path.join(current_dir, "resources", "serverless.yaml")
+        file_abs_path = os.path.abspath(scan_file_path)
+
+        report = runner.run(files=[file_abs_path], runner_filter=RunnerFilter(framework='serverless'), root_folder="")
+        self.assertEqual(0, len(report.parsing_errors))
+        self.assertLess(0, len(report.passed_checks + report.failed_checks))
 
     def tearDown(self):
         pass

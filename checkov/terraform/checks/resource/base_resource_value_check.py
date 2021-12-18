@@ -7,7 +7,10 @@ from checkov.terraform.checks.resource.base_resource_check import BaseResourceCh
 from checkov.common.models.enums import CheckResult, CheckCategories
 from checkov.common.models.consts import ANY_VALUE
 from checkov.common.util.type_forcers import force_list
+from checkov.terraform.graph_builder.utils import get_referenced_vertices_in_value
+from checkov.terraform.parser_functions import handle_dynamic_values
 from checkov.terraform.parser_utils import find_var_blocks
+
 
 
 class BaseResourceValueCheck(BaseResourceCheck):
@@ -50,25 +53,28 @@ class BaseResourceValueCheck(BaseResourceCheck):
         :param key: JSONPath key of an attribute
         :return: True/False
         """
-        return any([x in key for x in inspected_attributes])
+        return any(x in key for x in inspected_attributes)
 
     def scan_resource_conf(self, conf: Dict[str, List[Any]]) -> CheckResult:
-        self.handle_dynamic_values(conf)
+        handle_dynamic_values(conf)
         inspected_key = self.get_inspected_key()
         expected_values = self.get_expected_values()
         if dpath.search(conf, inspected_key) != {}:
             # Inspected key exists
-            if ANY_VALUE in expected_values:
-                # Key is found on the configuration - if it accepts any value, the check is PASSED
-                return CheckResult.PASSED
             value = dpath.get(conf, inspected_key)
             if isinstance(value, list) and len(value) == 1:
                 value = value[0]
+            if ANY_VALUE in expected_values and value is not None and (not isinstance(value, str) or value):
+                # Key is found on the configuration - if it accepts any value, the check is PASSED
+                return CheckResult.PASSED
             if self._is_variable_dependant(value):
                 # If the tested attribute is variable-dependant, then result is PASSED
                 return CheckResult.PASSED
             if value in expected_values:
                 return CheckResult.PASSED
+            if get_referenced_vertices_in_value(value=value, aliases={}, resources_types=[]):
+                # we don't provide resources_types as we want to stay provider agnostic
+                return CheckResult.UNKNOWN
             return CheckResult.FAILED
         else:
             # Look for the configuration in a bottom-up fashion
